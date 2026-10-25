@@ -1,0 +1,28 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+
+# IDE settings
+.idea/
+.vscode/
+*.iml
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+application-local.properties
+
+# Node.js
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+
+# Operating system
+.DS_Store
+Thumbs.db
