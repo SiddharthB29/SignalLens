@@ -1,11 +1,16 @@
 package com.signallens.ingestion.event;
 
+import com.signallens.ingestion.validation.MetadataMaxDepth;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
+import com.fasterxml.jackson.annotation.JsonFormat;
+import tools.jackson.databind.annotation.JsonDeserialize;
+import com.signallens.ingestion.validation.OffsetDateTimeStringDeserializer;
 
 public record EventRequest(
 
@@ -17,11 +22,11 @@ public record EventRequest(
         @Size(max = 100, message = "serviceName must not exceed 100 characters")
         String serviceName,
 
-        @NotBlank(message = "environment must not be blank")
-        @Size(max = 50, message = "environment must not exceed 50 characters")
-        String environment,
+        @NotNull(message = "environment is required")
+        Environment environment,
 
-        @NotNull(message = "occurredAt is required")
+        @JsonDeserialize(using = OffsetDateTimeStringDeserializer.class)
+        @NotNull
         OffsetDateTime occurredAt,
 
         @NotNull(message = "severity is required")
@@ -41,9 +46,38 @@ public record EventRequest(
         String traceId,
 
         @Size(max = 50, message = "metadata must not contain more than 50 entries")
+        @MetadataMaxDepth(5)
         Map<String, Object> metadata
 
 ) {
+    public EventRequest {
+        eventId = normalizeRequired(eventId);
+        serviceName = normalizeRequired(serviceName);
+        message = normalizeRequired(message);
+
+        exceptionType = normalizeOptional(exceptionType);
+        traceId = normalizeOptional(traceId);
+    }
+
+    private static String normalizeRequired(String value) {
+        return value == null ? null : value.trim();
+    }
+
+    private static String normalizeOptional(String value) {
+        if (value == null) {
+            return null;
+        }
+
+        String normalized = value.trim();
+        return normalized.isEmpty() ? null : normalized;
+    }
+
+    public enum Environment {
+        DEVELOPMENT,
+        STAGING,
+        PRODUCTION
+    }
+
     public enum Severity {
         WARN,
         ERROR,

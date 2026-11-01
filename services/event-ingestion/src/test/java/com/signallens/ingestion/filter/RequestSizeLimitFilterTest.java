@@ -9,6 +9,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.mockito.Mockito.*;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 class RequestSizeLimitFilterTest {
 
     private final RequestSizeLimitFilter filter =
@@ -45,8 +49,9 @@ class RequestSizeLimitFilterTest {
     }
 
     @Test
-    void requestAtDeclaredSizeLimitShouldPassInitialSizeCheck()
-            throws Exception {
+    void requestAtExactSizeLimitShouldPass() throws Exception {
+
+        byte[] body = new byte[65_536];
 
         MockHttpServletRequest request =
                 new MockHttpServletRequest() {
@@ -62,16 +67,25 @@ class RequestSizeLimitFilterTest {
                 };
 
         request.setMethod("POST");
+        request.setContent(body);
 
         MockHttpServletResponse response =
                 new MockHttpServletResponse();
+        AtomicBoolean chainInvoked = new AtomicBoolean(false);
 
-        FilterChain chain = mock(FilterChain.class);
+        FilterChain chain = (wrappedRequest, wrappedResponse) -> {
+            chainInvoked.set(true);
+
+            jakarta.servlet.http.HttpServletRequest httpRequest =
+                    (jakarta.servlet.http.HttpServletRequest) wrappedRequest;
+
+            httpRequest.getInputStream().readAllBytes();
+        };
 
         filter.doFilter(request, response, chain);
 
-        verify(chain).doFilter(any(), eq(response));
         assertNotEquals(413, response.getStatus());
+        assertTrue(chainInvoked.get());
     }
 
     @Test
@@ -109,5 +123,46 @@ class RequestSizeLimitFilterTest {
         filter.doFilter(request, response, chain);
 
         assertEquals(413, response.getStatus());
+    }
+    @Test
+    void requestAtExactLimitWithoutContentLengthShouldPass()
+            throws Exception {
+
+        byte[] body = new byte[65_536];
+
+        MockHttpServletRequest request =
+                new MockHttpServletRequest() {
+                    @Override
+                    public long getContentLengthLong() {
+                        return -1L;
+                    }
+
+                    @Override
+                    public int getContentLength() {
+                        return -1;
+                    }
+                };
+
+        request.setMethod("POST");
+        request.setContent(body);
+
+        MockHttpServletResponse response =
+                new MockHttpServletResponse();
+
+        AtomicBoolean chainInvoked = new AtomicBoolean(false);
+
+        FilterChain chain = (wrappedRequest, wrappedResponse) -> {
+            chainInvoked.set(true);
+
+            jakarta.servlet.http.HttpServletRequest httpRequest =
+                    (jakarta.servlet.http.HttpServletRequest) wrappedRequest;
+
+            httpRequest.getInputStream().readAllBytes();
+        };
+
+        filter.doFilter(request, response, chain);
+
+        assertNotEquals(413, response.getStatus());
+        assertTrue(chainInvoked.get());
     }
 }
