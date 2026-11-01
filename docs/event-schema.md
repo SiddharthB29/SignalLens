@@ -86,6 +86,8 @@ Requirements:
 - It must remain unchanged when a producer retries the same logical event.
 - It must not be reused for a different logical event.
 - It must be unique within the producer identity or namespace defined by the ingestion service.
+- It must contain no more than 100 characters.
+- Leading and trailing whitespace will be normalized by the ingestion service.
 
 For the initial implementation, SignalLens will require globally unique event IDs across accepted producers. The storage design will enforce uniqueness.
 
@@ -103,7 +105,7 @@ Requirements:
 
 - It must be present and non-empty.
 - It must contain no more than 100 characters.
-- Leading and trailing whitespace must be rejected or normalized consistently.
+- Leading and trailing whitespace will be removed by the ingestion service before validation.
 - The value should use a stable service identifier, such as `payment-service`.
 
 ### 3.3 Environment
@@ -152,7 +154,10 @@ The initial supported values are:
 - `ERROR`
 - `FATAL`
 
-Values must match the documented enum. Matching is case-sensitive in v1.
+Values must match one of the supported enum values. Matching is case-insensitive in v1.
+
+For example, `ERROR`, `error`, and `Error` are all accepted.
+Unsupported values such as `DEBUG` are rejected.
 
 The initial implementation focuses on error events. Support for informational or debug-level telemetry is outside the initial scope.
 
@@ -165,6 +170,7 @@ Requirements:
 - It must be present and non-empty.
 - It must contain no more than 2,000 characters.
 - It must not consist solely of whitespace.
+- Leading and trailing whitespace will be removed by the ingestion service before validation.
 
 The message may contribute to incident investigation and error fingerprinting, but raw messages will not be used as the only criterion for incident grouping.
 
@@ -181,6 +187,9 @@ Requirements:
 - It is optional.
 - If supplied, it must be a non-empty string.
 - It must contain no more than 200 characters.
+- It may be omitted or set to `null`.
+- Leading and trailing whitespace will be removed.
+- If the value contains only whitespace, it will be normalized to `null`.
 
 ### 3.8 Stack Trace
 
@@ -191,6 +200,7 @@ Requirements:
 - It is optional.
 - It must be a string if supplied.
 - It must not exceed 20,000 characters.
+- The ingestion service must preserve the supplied value exactly, including leading and trailing whitespace, indentation, and line breaks.
 
 The ingestion service must enforce an overall request-size limit in addition to individual field limits.
 
@@ -205,6 +215,9 @@ Requirements:
 - It is optional.
 - If supplied, it must be a non-empty string.
 - It must contain no more than 128 characters.
+- It may be omitted or set to `null`.
+- Leading and trailing whitespace will be removed.
+- If the value contains only whitespace, it will be normalized to `null`.
 
 When distributed tracing is integrated, the format can be tightened to match the tracing system's identifier format.
 
@@ -230,8 +243,11 @@ Requirements:
 - The complete request must remain within the configured request-size limit.
 - Metadata must not be allowed to override trusted server-generated fields such as `receivedAt` or processing status.
 - Credentials, access tokens, passwords, and other secrets must not be intentionally collected or retained.
+- The top-level metadata object must not contain more than 50 entries.
 
 The initial implementation will impose a maximum metadata nesting depth of 5 and reject unsupported or excessively complex payloads.
+
+The top-level metadata object counts as depth 1. Each nested object or array increases the depth by 1. Primitive values do not increase the depth.
 
 ---
 
