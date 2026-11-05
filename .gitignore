@@ -1,28 +1,73 @@
+# ==========================================
 # Java / Maven
+# ==========================================
 target/
 *.class
 *.jar
 *.war
+build/
 
+# Maven Wrapper
+.mvn/wrapper/maven-wrapper.jar
+
+# ==========================================
 # IDE settings
+# ==========================================
 .idea/
-.vscode/
 *.iml
+*.iws
+*.ipr
 
+# Eclipse / Spring Tool Suite
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.springBeans
+.sts4-cache/
+
+# NetBeans
+/nbproject/private/
+/nbbuild/
+/nb-gradle/
+
+# Visual Studio Code
+.vscode/
+
+# ==========================================
 # Local environment and secrets
+# ==========================================
 .env
 .env.*
 !.env.example
 application-local.properties
 
-# Node.js
+# ==========================================
+# Node.js / Frontend
+# ==========================================
 node_modules/
 dist/
-build/
 
+# ==========================================
 # Logs
+# ==========================================
 *.log
+logs/
 
-# Operating system
+# ==========================================
+# Operating System
+# ==========================================
 .DS_Store
 Thumbs.db
+
+# ==========================================
+# Temporary files
+# ==========================================
+*.tmp
+*.swp
+
+# ==========================================
+# Generated Spring Initializr help file
+# ==========================================
+HELP.md
