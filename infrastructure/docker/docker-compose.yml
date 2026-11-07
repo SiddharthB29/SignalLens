@@ -26,5 +26,18 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
 
+  postgres:
+    image: postgres:17
+    container_name: signallens-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: signallens
+      POSTGRES_USER: signalAdmin
+      POSTGRES_PASSWORD: signallens
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
 volumes:
   kafka_data:
+  postgres_data:
