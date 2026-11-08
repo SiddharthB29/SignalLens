@@ -49,7 +49,7 @@ public class FailureFingerprintGenerator {
         }
     }
 
-    private String normalizeMessage(String message) {
+    public String normalizeMessage(String message) {
 
         return message
                 .strip()

@@ -13,13 +13,16 @@ public class EventProcessingService {
 
     private final EventProcessor eventProcessor;
     private final ProcessedEventRepository processedEventRepository;
+    private final FailureGroupingService failureGroupingService;
 
     public EventProcessingService(
             EventProcessor eventProcessor,
-            ProcessedEventRepository processedEventRepository) {
+            ProcessedEventRepository processedEventRepository,
+            FailureGroupingService failureGroupingService) {
 
         this.eventProcessor = eventProcessor;
         this.processedEventRepository = processedEventRepository;
+        this.failureGroupingService = failureGroupingService;
     }
 
     @Transactional
@@ -74,6 +77,9 @@ public class EventProcessingService {
 
             return getExistingProcessedEvent(event.eventId());
         }
+
+        // Group the event only after successful persistence.
+        failureGroupingService.group(event);
 
         System.out.println("Event Processing Service: Processing completed");
 
