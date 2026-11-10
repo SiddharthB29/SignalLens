@@ -117,7 +117,112 @@ class FailureGroupingServiceIntegrationTest {
         assertEquals(1, occurrenceCount);
     }
 
+    @Test
+    @Transactional
+    void groupShouldMaintainCorrectFirstSeenAndLastSeenTimestamps() {
+
+        // Step 1: Create three unique event IDs.
+        testEventId = "fg-timestamp-" + UUID.randomUUID();
+        secondTestEventId = "fg-timestamp-" + UUID.randomUUID();
+
+        thirdTestEventId = "fg-timestamp-" + UUID.randomUUID();
+
+        // Step 2: Define timestamps in chronological order.
+        OffsetDateTime baseTime = OffsetDateTime.now()
+                .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+
+        OffsetDateTime firstOccurredAt = baseTime;
+        OffsetDateTime secondOccurredAt = baseTime.plusMinutes(10);
+        OffsetDateTime thirdOccurredAt = baseTime.plusMinutes(5);
+
+        // Step 3: Create three matching events.
+        IngestedEvent firstEvent = new IngestedEvent(
+                testEventId,
+                "payment-service",
+                Environment.PRODUCTION,
+                firstOccurredAt,
+                Severity.ERROR,
+                "Payment processing failed",
+                "NullPointerException",
+                "First stack trace",
+                "timestamp-trace-001",
+                null
+        );
+
+        IngestedEvent secondEvent = new IngestedEvent(
+                secondTestEventId,
+                "payment-service",
+                Environment.PRODUCTION,
+                secondOccurredAt,
+                Severity.ERROR,
+                "Payment processing failed",
+                "NullPointerException",
+                "Second stack trace",
+                "timestamp-trace-002",
+                null
+        );
+
+        IngestedEvent thirdEvent = new IngestedEvent(
+                thirdTestEventId,
+                "payment-service",
+                Environment.PRODUCTION,
+                thirdOccurredAt,
+                Severity.ERROR,
+                "Payment processing failed",
+                "NullPointerException",
+                "Third stack trace",
+                "timestamp-trace-003",
+                null
+        );
+
+        testFingerprint = fingerprintGenerator.generate(firstEvent);
+
+        // Step 4: Persist all three processed events.
+        for (IngestedEvent event :
+                java.util.List.of(firstEvent, secondEvent, thirdEvent)) {
+
+            int insertedRows = processedEventRepository.insertIfAbsent(
+                    event.eventId(),
+                    event.serviceName(),
+                    event.environment().name(),
+                    event.severity().name(),
+                    "TEST",
+                    event.message(),
+                    event.occurredAt(),
+                    OffsetDateTime.now(),
+                    event.traceId()
+            );
+
+            assertEquals(1, insertedRows);
+        }
+
+        // Step 5: Process events in this order: 10:00, 10:10, 10:05.
+        failureGroupingService.group(firstEvent);
+        failureGroupingService.group(secondEvent);
+        failureGroupingService.group(thirdEvent);
+
+        // Step 6: Retrieve the failure group.
+        FailureGroupEntity failureGroup =
+                failureGroupRepository.findByFingerprint(testFingerprint)
+                        .orElseThrow();
+
+        // Step 7: Verify timestamps and occurrence count.
+        assertEquals(
+                baseTime.toInstant().truncatedTo(java.time.temporal.ChronoUnit.MICROS),
+                failureGroup.getFirstSeenAt().toInstant()
+                        .truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+        );
+
+        assertEquals(
+                secondOccurredAt.toInstant().truncatedTo(java.time.temporal.ChronoUnit.MICROS),
+                failureGroup.getLastSeenAt().toInstant()
+                        .truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+        );
+        assertEquals(3L, failureGroup.getOccurrenceCount());
+    }
+
     private String secondTestEventId;
+    private String thirdTestEventId;
     @AfterEach
     void cleanUpTestData() {
 
@@ -142,6 +247,18 @@ class FailureGroupingServiceIntegrationTest {
             jdbcTemplate.update(
                     "DELETE FROM processed_events WHERE event_id = ?",
                     secondTestEventId
+            );
+        }
+
+        if (thirdTestEventId != null) {
+            jdbcTemplate.update(
+                    "DELETE FROM failure_occurrences WHERE event_id = ?",
+                    thirdTestEventId
+            );
+
+            jdbcTemplate.update(
+                    "DELETE FROM processed_events WHERE event_id = ?",
+                    thirdTestEventId
             );
         }
 
