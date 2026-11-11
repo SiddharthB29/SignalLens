@@ -2,6 +2,7 @@ package com.signallens.consumer.repository;
 
 import com.signallens.consumer.model.FailureGroupEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -9,8 +10,8 @@ import org.springframework.data.repository.query.Param;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 
-public interface FailureGroupRepository
-        extends JpaRepository<FailureGroupEntity, Long> {
+public interface FailureGroupRepository extends JpaRepository<FailureGroupEntity, Long>,
+        JpaSpecificationExecutor<FailureGroupEntity> {
 
     Optional<FailureGroupEntity> findByFingerprint(String fingerprint);
 
@@ -66,4 +67,18 @@ public interface FailureGroupRepository
             @Param("id") Long id,
             @Param("lastSeenAt") OffsetDateTime lastSeenAt
     );
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(value = """
+            UPDATE failure_groups
+            SET status = :newStatus
+            WHERE id = :id
+              AND status = :expectedStatus
+            """, nativeQuery = true)
+    int updateStatus(
+            @Param("id") Long id,
+            @Param("expectedStatus") String expectedStatus,
+            @Param("newStatus") String newStatus
+    );
+
 }

@@ -1,6 +1,8 @@
 package com.signallens.consumer.repository;
 
 import com.signallens.consumer.model.FailureOccurrenceEntity;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -10,6 +12,11 @@ import java.time.OffsetDateTime;
 
 public interface FailureOccurrenceRepository
         extends JpaRepository<FailureOccurrenceEntity, Long> {
+
+    Page<FailureOccurrenceEntity> findByFailureGroup_Id(
+            Long failureGroupId,
+            Pageable pageable
+    );
 
     @Modifying
     @Query(value = """
