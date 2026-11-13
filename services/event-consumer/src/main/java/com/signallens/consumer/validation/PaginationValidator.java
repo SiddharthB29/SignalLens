@@ -47,6 +47,15 @@ public class PaginationValidator {
         }
     }
 
+    public void validateId(Long id) {
+
+        if (id == null || id <= 0) {
+            throw new IllegalArgumentException(
+                    "Failure group ID must be a positive number."
+            );
+        }
+    }
+
     public void validateSorting(
             Pageable pageable,
             Set<String> allowedFields

@@ -24,6 +24,7 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.Comparator;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -166,6 +167,212 @@ class FailureGroupControllerIntegrationTest {
     }
 
     @Test
+    void shouldSortMultipleOccurrencesInAscendingAndDescendingOrder() {
+
+        String serviceName = "sorting-test-service";
+        Environment environment = Environment.PRODUCTION;
+        String message = "Repeated payment processing failure";
+        String exceptionType = "NullPointerException";
+
+        OffsetDateTime baseTime = OffsetDateTime.now();
+
+        String oldestEventId = "sorting-oldest-" + UUID.randomUUID();
+        String middleEventId = "sorting-middle-" + UUID.randomUUID();
+        String newestEventId = "sorting-newest-" + UUID.randomUUID();
+
+        List<String> eventIds = List.of(
+                oldestEventId,
+                middleEventId,
+                newestEventId
+        );
+
+        List<OffsetDateTime> timestamps = List.of(
+                baseTime.minusHours(2),
+                baseTime.minusHours(1),
+                baseTime
+        );
+
+        String fingerprint = null;
+
+        for (int i = 0; i < eventIds.size(); i++) {
+
+            IngestedEvent event = new IngestedEvent(
+                    eventIds.get(i),
+                    serviceName,
+                    environment,
+                    timestamps.get(i),
+                    Severity.ERROR,
+                    message,
+                    exceptionType,
+                    "Sorting integration test stack trace",
+                    "sorting-trace-" + UUID.randomUUID(),
+                    null
+            );
+
+            if (fingerprint == null) {
+                fingerprint = fingerprintGenerator.generate(event);
+                testFingerprints.add(fingerprint);
+            }
+
+            testEventIds.add(event.eventId());
+
+            eventProcessingService.process(event);
+        }
+
+        FailureGroupEntity group = failureGroupRepository
+                .findByFingerprint(fingerprint)
+                .orElseThrow();
+
+        ResponseEntity<JsonNode> ascendingResponse =
+                restTemplate.getForEntity(
+                        "/api/failure-groups/" + group.getId()
+                                + "/occurrences?page=0&size=10&sort=occurredAt,asc",
+                        JsonNode.class
+                );
+
+        assertEquals(HttpStatus.OK, ascendingResponse.getStatusCode());
+        assertNotNull(ascendingResponse.getBody());
+
+        JsonNode ascendingOccurrences =
+                ascendingResponse.getBody().path("content");
+
+        assertEquals(3, ascendingOccurrences.size());
+
+        assertEquals(
+                oldestEventId,
+                ascendingOccurrences.get(0).path("eventId").asText()
+        );
+
+        assertEquals(
+                middleEventId,
+                ascendingOccurrences.get(1).path("eventId").asText()
+        );
+
+        assertEquals(
+                newestEventId,
+                ascendingOccurrences.get(2).path("eventId").asText()
+        );
+
+        ResponseEntity<JsonNode> descendingResponse =
+                restTemplate.getForEntity(
+                        "/api/failure-groups/" + group.getId()
+                                + "/occurrences?page=0&size=10&sort=occurredAt,desc",
+                        JsonNode.class
+                );
+
+        assertEquals(HttpStatus.OK, descendingResponse.getStatusCode());
+        assertNotNull(descendingResponse.getBody());
+
+        JsonNode descendingOccurrences =
+                descendingResponse.getBody().path("content");
+
+        assertEquals(3, descendingOccurrences.size());
+
+        assertEquals(
+                newestEventId,
+                descendingOccurrences.get(0).path("eventId").asText()
+        );
+
+        assertEquals(
+                middleEventId,
+                descendingOccurrences.get(1).path("eventId").asText()
+        );
+
+        assertEquals(
+                oldestEventId,
+                descendingOccurrences.get(2).path("eventId").asText()
+        );
+    }
+
+    @Test
+    void shouldPaginateOccurrencesAcrossMultiplePages() {
+
+        String serviceName = "pagination-test-service";
+        Environment environment = Environment.PRODUCTION;
+        String message = "Repeated inventory processing failure";
+        String exceptionType = "IllegalStateException";
+
+        OffsetDateTime baseTime = OffsetDateTime.now();
+
+        List<String> expectedEventIds = new ArrayList<>();
+
+        String fingerprint = null;
+
+        for (int i = 0; i < 5; i++) {
+
+            String eventId = "pagination-event-" + UUID.randomUUID();
+
+            expectedEventIds.add(eventId);
+
+            IngestedEvent event = new IngestedEvent(
+                    eventId,
+                    serviceName,
+                    environment,
+                    baseTime.plusMinutes(i),
+                    Severity.ERROR,
+                    message,
+                    exceptionType,
+                    "Pagination integration test stack trace",
+                    "pagination-trace-" + UUID.randomUUID(),
+                    null
+            );
+
+            if (fingerprint == null) {
+                fingerprint = fingerprintGenerator.generate(event);
+                testFingerprints.add(fingerprint);
+            }
+
+            testEventIds.add(eventId);
+
+            eventProcessingService.process(event);
+        }
+
+        FailureGroupEntity group = failureGroupRepository
+                .findByFingerprint(fingerprint)
+                .orElseThrow();
+
+        List<String> retrievedEventIds = new ArrayList<>();
+
+        for (int page = 0; page < 3; page++) {
+
+            ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                    "/api/failure-groups/" + group.getId()
+                            + "/occurrences?page=" + page
+                            + "&size=2&sort=occurredAt,asc",
+                    JsonNode.class
+            );
+
+            assertEquals(HttpStatus.OK, response.getStatusCode());
+            assertNotNull(response.getBody());
+
+            JsonNode body = response.getBody();
+            JsonNode content = body.path("content");
+
+            int expectedPageSize = page < 2 ? 2 : 1;
+
+            assertEquals(expectedPageSize, content.size());
+
+            JsonNode pageMetadata = body.path("page");
+
+            assertEquals(5, pageMetadata.path("totalElements").asInt());
+            assertEquals(3, pageMetadata.path("totalPages").asInt());
+
+            for (JsonNode occurrence : content) {
+                retrievedEventIds.add(
+                        occurrence.path("eventId").asText()
+                );
+            }
+        }
+
+        assertEquals(5, retrievedEventIds.size());
+        assertEquals(expectedEventIds, retrievedEventIds);
+        assertEquals(
+                5,
+                retrievedEventIds.stream().distinct().count()
+        );
+    }
+
+    @Test
     void shouldSupportFailureGroupStatusTransitions() {
 
         FailureGroupEntity group = createFailureGroup(
@@ -224,6 +431,153 @@ class FailureGroupControllerIntegrationTest {
         );
 
         assertEquals(HttpStatus.NOT_FOUND, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForNegativeFailureGroupId() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups/-1",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForZeroFailureGroupId() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups/0",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForNegativeOccurrenceFailureGroupId() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups/-1/occurrences",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForNegativeIdWhenAcknowledging() {
+
+        ResponseEntity<JsonNode> response = restTemplate.exchange(
+                "/api/failure-groups/-1/acknowledge",
+                HttpMethod.PATCH,
+                HttpEntity.EMPTY,
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForNegativeIdWhenResolving() {
+
+        ResponseEntity<JsonNode> response = restTemplate.exchange(
+                "/api/failure-groups/-1/resolve",
+                HttpMethod.PATCH,
+                HttpEntity.EMPTY,
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForNegativeIdWhenReopening() {
+
+        ResponseEntity<JsonNode> response = restTemplate.exchange(
+                "/api/failure-groups/-1/reopen",
+                HttpMethod.PATCH,
+                HttpEntity.EMPTY,
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForMalformedFailureGroupId() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups/abc",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForMalformedOccurrenceFailureGroupId() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups/abc/occurrences",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForMalformedPageNumber() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups?page=abc",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForMalformedPageSize() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups?size=abc",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnBadRequestForMalformedOccurrencePagination() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups/1/occurrences?page=abc",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+    }
+
+    @Test
+    void shouldReturnEmptyPageWhenNoFailureGroupsMatchFilter() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups?serviceName=nonexistent-service-"
+                        + UUID.randomUUID(),
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertNotNull(response.getBody());
+
+        JsonNode body = response.getBody();
+
+        assertTrue(body.path("content").isArray());
+        assertEquals(0, body.path("content").size());
+        assertEquals(0, body.path("totalElements").asInt());
+        assertEquals(0, body.path("totalPages").asInt());
     }
 
     @Test

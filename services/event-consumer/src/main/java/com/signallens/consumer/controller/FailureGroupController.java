@@ -61,6 +61,7 @@ public class FailureGroupController {
     public FailureGroupResponse getFailureGroupById(
             @PathVariable Long id
     ) {
+        paginationValidator.validateId(id);
         return failureManagementService.getFailureGroupById(id);
     }
 
@@ -75,6 +76,7 @@ public class FailureGroupController {
                     direction = Sort.Direction.DESC
             ) Pageable pageable
     ) {
+        paginationValidator.validateId(id);
         paginationValidator.validate(page, size);
         paginationValidator.validateSorting(
                 pageable,
@@ -88,6 +90,7 @@ public class FailureGroupController {
     public FailureGroupResponse acknowledge(
             @PathVariable Long id
     ) {
+        paginationValidator.validateId(id);
         return failureManagementService.acknowledge(id);
     }
 
@@ -95,6 +98,7 @@ public class FailureGroupController {
     public FailureGroupResponse resolve(
             @PathVariable Long id
     ) {
+        paginationValidator.validateId(id);
         return failureManagementService.resolve(id);
     }
 
@@ -102,6 +106,7 @@ public class FailureGroupController {
     public FailureGroupResponse reopen(
             @PathVariable Long id
     ) {
+        paginationValidator.validateId(id);
         return failureManagementService.reopen(id);
     }
 }
