@@ -1,43 +1,13 @@
-# SignalLens — Event Schema and Ingestion API Contract
+# Event Schema and API Reference
 
-**Document Version:** 1.0  
-**API Version:** v1  
-**Status:** Initial Design  
-**Last Updated:** 2026-10-25
+**Status:** Current implementation reference (November 2026)  
+**Ingestion API version:** v1
 
----
+This document describes the implemented event ingestion contract and the consumer's failure-group API. It calls out where behavior is currently narrower than a production reliability contract.
 
-## 1. Purpose
+## Submit an event
 
-This document defines the event payload, validation rules, HTTP API contract, duplicate-event handling, and reliability requirements for the SignalLens Event Ingestion Service.
-
-The service receives error events from applications and makes accepted events available for asynchronous processing by downstream services.
-
-The contract is intended to ensure that:
-
-- Producers send events in a consistent format.
-- Invalid or excessively large requests are rejected.
-- Repeated submissions do not create duplicate logical events.
-- Downstream services can process events reliably.
-- Future contract changes do not unnecessarily break existing producers.
-
----
-
-## 2. API Endpoint
-
-### Submit an Event
-
-**Method:** `POST`
-
-**Endpoint:** `/api/v1/events`
-
-**Content-Type:** `application/json`
-
-**Purpose:** Submit a single application error event to SignalLens.
-
-The endpoint accepts one event per request in the initial version. Batch ingestion is outside the scope of v1.
-
-### Example Request
+`POST /api/v1/events` on the ingestion service (default `http://localhost:8080`). Send one JSON event per request with `Content-Type: application/json`.
 
 ```json
 {
@@ -57,523 +27,87 @@ The endpoint accepts one event per request in the initial version. Batch ingesti
 }
 ```
 
----
+| Field | Type | Required | Implemented constraints and behavior |
+| --- | --- | --- | --- |
+| `eventId` | String | Yes | Non-blank; maximum 100 characters; trimmed. Used as the Kafka key and consumer-side event identity. |
+| `serviceName` | String | Yes | Non-blank; maximum 100 characters; trimmed. |
+| `environment` | Enum string | Yes | `DEVELOPMENT`, `STAGING`, or `PRODUCTION`; case-insensitive on input. |
+| `occurredAt` | ISO 8601 date-time string | Yes | Must parse as `OffsetDateTime`, so a UTC offset or `Z` is required. |
+| `severity` | Enum string | Yes | `WARN`, `ERROR`, or `FATAL`; case-insensitive on input. |
+| `message` | String | Yes | Non-blank; maximum 2,000 characters; trimmed. |
+| `exceptionType` | String or null | No | Maximum 200 characters; trimmed; blank becomes null. |
+| `stackTrace` | String or null | No | Maximum 20,000 characters. Its content is not trimmed by the request DTO. |
+| `traceId` | String or null | No | Maximum 128 characters; trimmed; blank becomes null. |
+| `metadata` | JSON object or null | No | Maximum 50 top-level entries and nesting depth 5. The complete body remains subject to the 64 KiB limit. |
 
-## 3. Event Schema
+`receivedAt` is not part of the accepted request. The consumer records processing time when it creates a processed event. Metadata is accepted but is not currently included in the consumer's persisted processed-event response model.
 
-An event represents one occurrence of an error reported by an application.
+### Responses
 
-| Field           | Data Type          | Required | Description                                                         |
-| --------------- | ------------------ | -------- | ------------------------------------------------------------------- |
-| `eventId`       | String             | Yes      | Stable, unique identifier for the event                             |
-| `serviceName`   | String             | Yes      | Name of the application or service that generated the event         |
-| `environment`   | String             | Yes      | Deployment environment, such as development, staging, or production |
-| `occurredAt`    | ISO 8601 timestamp | Yes      | Time at which the error occurred                                    |
-| `severity`      | String / Enum      | Yes      | Severity classification of the event                                |
-| `message`       | String             | Yes      | Human-readable description of the error                             |
-| `exceptionType` | String             | No       | Exception or error class, when available                            |
-| `stackTrace`    | String             | No       | Stack trace or diagnostic details, when available                   |
-| `traceId`       | String             | No       | Distributed trace identifier, when available                        |
-| `metadata`      | Object             | No       | Additional structured context about the event                       |
-
-### 3.1 Event ID
-
-`eventId` identifies an individual event occurrence.
-
-Requirements:
-
-- It must be present and non-empty.
-- It must remain unchanged when a producer retries the same logical event.
-- It must not be reused for a different logical event.
-- It must be unique within the producer identity or namespace defined by the ingestion service.
-- It must contain no more than 100 characters.
-- Leading and trailing whitespace will be normalized by the ingestion service.
-
-For the initial implementation, SignalLens will require globally unique event IDs across accepted producers. The storage design will enforce uniqueness.
-
-If IDs are generated by a producer, UUIDs are recommended.
-
-Example:
-
-`550e8400-e29b-41d4-a716-446655440000`
-
-### 3.2 Service Name
-
-`serviceName` identifies the application that produced the event.
-
-Requirements:
-
-- It must be present and non-empty.
-- It must contain no more than 100 characters.
-- Leading and trailing whitespace will be removed by the ingestion service before validation.
-- The value should use a stable service identifier, such as `payment-service`.
-
-### 3.3 Environment
-
-`environment` identifies the environment in which the error occurred.
-
-Requirements:
-
-- It must be present and non-empty.
-- It must contain no more than 50 characters.
-- The initial supported values are `development`, `staging`, and `production`.
-
-The implementation may enforce these values using an enum. Additional environments will require a documented contract change if they are not accepted by the current implementation.
-
-### 3.4 Occurrence Timestamp
-
-`occurredAt` records when the error occurred at the source.
-
-Requirements:
-
-- It must be a valid ISO 8601 date-time with a timezone or UTC offset.
-- UTC timestamps ending in `Z` are recommended.
-- The server must reject malformed timestamps.
-- The server must not silently interpret a timestamp without a timezone as UTC.
-
-Example:
-
-`2026-10-25T06:30:00Z`
-
-The ingestion service will record a separate server-generated `receivedAt` timestamp.
-
-`occurredAt` and `receivedAt` serve different purposes:
-
-- `occurredAt` records when the error happened.
-- `receivedAt` records when SignalLens received it.
-
-Their difference can be used to measure ingestion delay.
-
-### 3.5 Severity
-
-`severity` classifies the reported event.
-
-The initial supported values are:
-
-- `WARN`
-- `ERROR`
-- `FATAL`
-
-Values must match one of the supported enum values. Matching is case-insensitive in v1.
-
-For example, `ERROR`, `error`, and `Error` are all accepted.
-Unsupported values such as `DEBUG` are rejected.
-
-The initial implementation focuses on error events. Support for informational or debug-level telemetry is outside the initial scope.
-
-### 3.6 Message
-
-`message` contains a human-readable description of the error.
-
-Requirements:
-
-- It must be present and non-empty.
-- It must contain no more than 2,000 characters.
-- It must not consist solely of whitespace.
-- Leading and trailing whitespace will be removed by the ingestion service before validation.
-
-The message may contribute to incident investigation and error fingerprinting, but raw messages will not be used as the only criterion for incident grouping.
-
-### 3.7 Exception Type
-
-`exceptionType` identifies the exception class or error type when available.
-
-Example:
-
-`SQLTransientConnectionException`
-
-Requirements:
-
-- It is optional.
-- If supplied, it must be a non-empty string.
-- It must contain no more than 200 characters.
-- It may be omitted or set to `null`.
-- Leading and trailing whitespace will be removed.
-- If the value contains only whitespace, it will be normalized to `null`.
-
-### 3.8 Stack Trace
-
-`stackTrace` contains diagnostic stack trace information when available.
-
-Requirements:
-
-- It is optional.
-- It must be a string if supplied.
-- It must not exceed 20,000 characters.
-- The ingestion service must preserve the supplied value exactly, including leading and trailing whitespace, indentation, and line breaks.
-
-The ingestion service must enforce an overall request-size limit in addition to individual field limits.
-
-Stack traces may contain file paths, internal infrastructure details, or sensitive values. They must not be written indiscriminately to application logs or exposed to unauthorized users.
-
-### 3.9 Trace ID
-
-`traceId` identifies a distributed trace associated with the error.
-
-Requirements:
-
-- It is optional.
-- If supplied, it must be a non-empty string.
-- It must contain no more than 128 characters.
-- It may be omitted or set to `null`.
-- Leading and trailing whitespace will be removed.
-- If the value contains only whitespace, it will be normalized to `null`.
-
-When distributed tracing is integrated, the format can be tightened to match the tracing system's identifier format.
-
-### 3.10 Metadata
-
-`metadata` contains optional structured context about the error.
-
-Example:
+On successful Kafka publication, the service responds `202 Accepted`:
 
 ```json
 {
-  "endpoint": "/api/payments",
-  "region": "local",
-  "deploymentVersion": "1.2.0"
-}
-```
-
-Requirements:
-
-- It must be a JSON object if supplied.
-- Keys must be strings.
-- Values must be valid JSON values.
-- The complete request must remain within the configured request-size limit.
-- Metadata must not be allowed to override trusted server-generated fields such as `receivedAt` or processing status.
-- Credentials, access tokens, passwords, and other secrets must not be intentionally collected or retained.
-- The top-level metadata object must not contain more than 50 entries.
-
-The initial implementation will impose a maximum metadata nesting depth of 5 and reject unsupported or excessively complex payloads.
-
-The top-level metadata object counts as depth 1. Each nested object or array increases the depth by 1. Primitive values do not increase the depth.
-
----
-
-## 4. Validation Rules
-
-The Event Ingestion Service must validate incoming requests before publishing them to Kafka.
-
-The following conditions make an event invalid:
-
-- Required fields are missing.
-- Required strings are empty or contain only whitespace.
-- A field has an unexpected JSON type.
-- `eventId` or another bounded field exceeds its permitted length.
-- `occurredAt` is malformed or lacks a timezone.
-- `severity` is not one of the supported values.
-- `metadata` is not a JSON object.
-- The request exceeds the configured maximum size.
-- The JSON body is malformed.
-
-Validation must happen before the event is published.
-
-Invalid requests must not be published to Kafka.
-
-The service must return a consistent error response that identifies the invalid field or category without exposing internal implementation details.
-
-### Initial Request Size Limit
-
-The maximum request body size for v1 is **64 KiB (65,536 bytes)**.
-
-This is an initial engineering limit that may be adjusted after testing. The limit applies to the complete request body, including stack traces and metadata.
-
----
-
-## 5. Successful Response
-
-When an event has been accepted, the service returns:
-
-**HTTP Status:** `202 Accepted`
-
-Example:
-
-```json
-{
+  "status": "accepted",
   "eventId": "evt-10001",
-  "status": "ACCEPTED"
+  "message": "Event published successfully"
 }
 ```
 
-The response means that SignalLens has accepted responsibility for asynchronous processing according to its documented durability guarantees.
+Other implemented outcomes:
 
-After Kafka integration, the service must not return success merely because a publish operation was started. It must wait for the configured Kafka acknowledgement and handle publish failures appropriately.
+| Status | Meaning |
+| --- | --- |
+| `400 Bad Request` | Malformed JSON, invalid enum/date-time, or request validation failure. Validation responses include `fieldErrors`; malformed input returns a general message. |
+| `413 Payload Too Large` | Request exceeds 64 KiB (65,536 bytes), including bodies without a declared content length that exceed the streaming limit. |
+| `503 Service Unavailable` | Kafka send failed, so the event was not acknowledged as accepted. |
 
-An accepted event is not necessarily already persisted as an incident. Incident creation and grouping happen asynchronously in the Incident Service.
+The service does not currently require authentication, enforce a rate limit, compare duplicate event payloads, or return `409` for reused event IDs. A repeated submission can be published again; the consumer suppresses repeated `eventId` processing when its database record already exists. This consumer behavior is not an ingestion-side idempotency guarantee.
 
----
+## Failure group API
 
-## 6. Error Responses
+The consumer service listens on port `8081`. Responses use Spring's page representation for list endpoints. `page` is zero-based; `size` defaults to 20 and must be between 1 and 100. Sorting may use one allowlisted property. Defaults are `lastSeenAt,desc` for groups and `occurredAt,desc` for occurrences.
 
-### 6.1 Bad Request — 400
+### List failure groups
 
-Returned when the request is malformed or violates the event schema.
+`GET /api/failure-groups`
 
-Example:
+Optional query parameters:
 
-```json
-{
-  "status": 400,
-  "error": "VALIDATION_ERROR",
-  "message": "Request validation failed",
-  "details": [
-    {
-      "field": "serviceName",
-      "message": "must not be blank"
-    }
-  ]
-}
-```
+- `status`: `OPEN`, `ACKNOWLEDGED`, or `RESOLVED` (case-insensitive).
+- `serviceName`: exact service name match after trimming.
+- `environment`: `DEVELOPMENT`, `STAGING`, or `PRODUCTION` (case-insensitive).
+- `page`, `size`, `sort`: Spring pageable parameters. Example: `?status=OPEN&page=0&size=20&sort=lastSeenAt,desc`.
 
-The `details` array may contain one or more validation failures.
+Allowed group sort fields: `id`, `serviceName`, `environment`, `status`, `firstSeenAt`, `lastSeenAt`, `occurrenceCount`.
 
-### 6.2 Unauthorized — 401
+### Get a group and its occurrences
 
-Returned when authentication is required and the request does not contain valid authentication credentials.
+- `GET /api/failure-groups/{id}` returns `id`, `fingerprint`, `serviceName`, `environment`, `exceptionType`, `normalizedMessage`, `status`, `firstSeenAt`, `lastSeenAt`, and `occurrenceCount`.
+- `GET /api/failure-groups/{id}/occurrences` returns a page of occurrences. Each includes `occurrenceId`, `eventId`, service, environment, severity, classification, message, `occurredAt`, `processedAt`, `createdAt`, and `traceId`.
 
-The exact authentication mechanism will be defined during the security implementation phase.
+Allowed occurrence sort fields: `id`, `occurredAt`, `createdAt`.
 
-### 6.3 Forbidden — 403
+### Change group status
 
-Returned when the caller is authenticated but is not authorized to submit events.
+Each request is a `PATCH` with no request body:
 
-### 6.4 Conflict — 409
+- `PATCH /api/failure-groups/{id}/acknowledge`: `OPEN` → `ACKNOWLEDGED`.
+- `PATCH /api/failure-groups/{id}/resolve`: `OPEN` or `ACKNOWLEDGED` → `RESOLVED`.
+- `PATCH /api/failure-groups/{id}/reopen`: `RESOLVED` → `OPEN`.
 
-Returned when an existing `eventId` is submitted with a different payload.
+The response is the updated failure-group object. IDs must be positive. Missing groups return 404, invalid parameters return 400, and disallowed or concurrently changed status transitions return 409. This API currently has no authentication or authorization.
 
-Example:
+## How grouping works
 
-```json
-{
-  "status": 409,
-  "error": "EVENT_ID_CONFLICT",
-  "message": "The eventId is already associated with a different event payload"
-}
-```
+The consumer generates a SHA-256 fingerprint from service name, environment, exception type, and message normalized by stripping outer whitespace, lowercasing, and collapsing whitespace. It does not currently remove variable values such as IDs or timestamps from messages. Similar errors with different messages may therefore form separate groups.
 
-The response must not expose the original event's sensitive contents.
+Each successfully persisted event is stored once by `eventId` and linked to a failure group. A group count increases only when a new occurrence is inserted. Events are grouped after asynchronous Kafka delivery, so they may not yet appear in the API immediately after an ingestion response.
 
-### 6.5 Payload Too Large — 413
+## Reliability and security notes
 
-Returned when the request body exceeds the configured size limit.
-
-Example:
-
-```json
-{
-  "status": 413,
-  "error": "PAYLOAD_TOO_LARGE",
-  "message": "The request body exceeds the maximum allowed size"
-}
-```
-
-### 6.6 Too Many Requests — 429
-
-Returned when a producer exceeds the configured ingestion rate limit.
-
-The service may include a `Retry-After` header when an appropriate retry interval can be determined.
-
-Rate limiting will be implemented in a later phase.
-
-### 6.7 Service Unavailable — 503
-
-Returned when the service cannot safely accept the event because a required dependency is unavailable or the event cannot be durably enqueued.
-
-The service must not claim successful acceptance when it cannot meet the configured durability requirements.
-
-Example:
-
-```json
-{
-  "status": 503,
-  "error": "INGESTION_UNAVAILABLE",
-  "message": "The event could not be accepted for processing"
-}
-```
-
----
-
-## 7. Idempotency and Duplicate Events
-
-### 7.1 Definition
-
-Idempotency means that repeating the same logical operation does not create repeated logical effects.
-
-A producer may retry a request if it does not receive a response, even when the original request was successfully accepted.
-
-SignalLens must handle such retries safely.
-
-### 7.2 Same Event ID and Same Payload
-
-If an event with a given `eventId` has already been accepted and the same logical event is submitted again:
-
-- The request must not create another logical event.
-- The service should return the existing accepted outcome.
-- The response may include a duplicate indicator.
-- The event must not produce duplicate incident-processing effects.
-
-Example response:
-
-```json
-{
-  "eventId": "evt-10001",
-  "status": "ACCEPTED",
-  "duplicate": true
-}
-```
-
-For this contract, an already accepted duplicate is considered successfully handled. The original acceptance and its durability guarantees must be preserved.
-
-### 7.3 Same Event ID and Different Payload
-
-If an event ID is already associated with one payload and a request reuses that ID for a different logical event:
-
-- The request must be rejected with `409 Conflict`.
-- The original event must not be overwritten.
-- The conflicting event must not be published as a new logical event.
-- The conflict should be logged using safe diagnostic metadata.
-
-Payload equality must be determined using a documented canonicalization or payload-hash strategy. Irrelevant differences in JSON object key ordering should not, by themselves, make otherwise equivalent JSON payloads conflict.
-
-### 7.4 Different Event IDs and Similar Errors
-
-Different event IDs may describe the same underlying failure.
-
-Such events are valid individual occurrences. They must not be discarded merely because their messages are similar.
-
-The Incident Service will use a separate fingerprinting and correlation mechanism to determine whether those events belong to the same incident.
-
-### 7.5 Durability of Deduplication
-
-Deduplication must remain correct across application restarts and repeated Kafka delivery.
-
-Redis may support temporary coordination or optimization, but Redis alone must not be the authoritative record of accepted event IDs.
-
-Durable storage constraints and transaction design must enforce the required uniqueness and processing guarantees.
-
-The system must also define how long event IDs remain protected against reuse. The initial design will retain deduplication identity for as long as the corresponding event record or designated deduplication record is retained.
-
----
-
-## 8. Event Processing and Reliability Guarantees
-
-### 8.1 Asynchronous Processing
-
-Event ingestion and incident processing are separate operations.
-
-The ingestion service validates and enqueues events. The Incident Service consumes them asynchronously.
-
-A successful HTTP response does not mean that incident processing has completed.
-
-### 8.2 Kafka Publishing
-
-Once Kafka is introduced:
-
-- The producer must use a stable event identifier.
-- The service must wait for the configured broker acknowledgement before reporting successful new-event acceptance.
-- Publish failures must be handled explicitly.
-- The service must avoid recording an accepted-event state that cannot be reconciled with successful publication.
-
-The final design must address failures between durable idempotency records and Kafka publication, including the use of a transactional outbox or another demonstrably reliable approach.
-
-### 8.3 Consumer Idempotency
-
-The Incident Service must tolerate repeated delivery of the same event.
-
-The database design must prevent duplicate logical event records and repeated application of the same event to incident state.
-
-Kafka offset commits and database transactions must be designed with their independent failure modes in mind.
-
-### 8.4 Retries and Dead-Letter Handling
-
-Transient processing failures may be retried according to a bounded retry policy.
-
-Events that cannot be processed after the configured retry attempts must be routed to an appropriate dead-letter topic, with sufficient diagnostic information for investigation.
-
-Invalid event payloads must not be allowed to create uncontrolled retry loops.
-
-### 8.5 Ordering
-
-The initial contract does not guarantee global ordering across all events.
-
-If per-service ordering becomes necessary, Kafka partitioning and message-key selection will be designed accordingly.
-
-Incident processing must not assume that events from different producers arrive in occurrence-time order.
-
----
-
-## 9. Security and Data Handling
-
-The ingestion service must:
-
-- Authenticate and authorize producers before accepting protected requests.
-- Enforce request-size and field-size limits.
-- Avoid logging credentials, access tokens, or complete sensitive payloads.
-- Avoid storing secrets embedded in messages or stack traces when they can be safely redacted.
-- Restrict access to incident details and diagnostic information.
-- Validate metadata before persistence or downstream processing.
-- Use configuration or environment-based secret injection rather than committing secrets to source control.
-
-Authentication, rate limiting, redaction, and authorization will be implemented progressively. This document describes the intended contract, not a claim that all controls are already implemented.
-
----
-
-## 10. API Versioning and Compatibility
-
-The initial endpoint is:
-
-`POST /api/v1/events`
-
-The `/v1/` path identifies the first version of the public ingestion API contract.
-
-Backward-compatible additions, such as introducing an optional field, should generally remain in v1.
-
-Changes that break existing producers may require a new API version. Examples include removing or renaming existing fields, changing their types incompatibly, or making previously optional fields mandatory.
-
-Any contract change must be documented and covered by tests.
-
----
-
-## 11. Out of Scope for the Initial Ingestion Contract
-
-The following features are intentionally deferred:
-
-- Batch event ingestion.
-- Arbitrary custom severity values.
-- Dynamic schema registration.
-- Global event ordering.
-- Autonomous incident remediation.
-- Guaranteed exactly-once delivery across all services.
-- Full production-grade multi-tenant isolation.
-
-These features may be introduced later if their engineering value justifies the additional complexity.
-
----
-
-## 12. Acceptance Criteria
-
-The implementation of this contract will be considered complete when automated tests verify that:
-
-1. A valid event passes validation.
-2. An event missing a required field is rejected.
-3. Malformed timestamps and unsupported severity values are rejected.
-4. Oversized payloads are rejected.
-5. Optional fields can be omitted.
-6. A newly accepted event is acknowledged only after the required enqueue guarantee is met.
-7. A retry with the same event ID and equivalent payload does not create another logical event.
-8. Reusing an event ID with a different payload returns `409 Conflict`.
-9. Distinct event IDs can be accepted even when they represent similar errors.
-10. Repeated Kafka delivery does not produce duplicate logical processing effects.
-11. Failure scenarios are tested, including publish failures and consumer restarts.
-12. Error responses do not expose secrets or internal implementation details.
-
----
-
-## 13. Implementation Status
-
-This document defines the initial design contract.
-
-The Java DTOs, validation annotations, REST controller, error handlers, persistence constraints, Kafka publishing, idempotency mechanism, and automated tests will be implemented incrementally.
-
-The implementation must be tested against this contract, and the document must be updated whenever an intentional design change is made.
+- `202` means Kafka acknowledged the producer send; it does not mean the consumer has committed the event to PostgreSQL or created a failure group.
+- The current deployment uses a single local Kafka broker and does not configure an explicit outbox, dead-letter topic, application retry policy, or exactly-once delivery guarantee.
+- PostgreSQL uniqueness and consumer-side inserts protect persisted event identity, but there is no durable ingestion record linking acceptance to publication.
+- No credential redaction or authentication is implemented. Producers should avoid sending secrets in messages, stack traces, and metadata.
+- Batch ingestion, arbitrary severity values, and API version negotiation are not implemented.

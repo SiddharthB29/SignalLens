@@ -1,100 +1,68 @@
-# SignalLens — Initial Architecture
+# SignalLens Architecture
 
-## 1. Project Overview
+**Status:** Describes the current backend implementation (November 2026).
 
-SignalLens is an AI-assisted incident intelligence platform that ingests application error events, groups related errors into incidents, and helps developers investigate failures using relevant technical documentation.
+## Overview
 
-## 2. Architecture Goals
+SignalLens currently consists of two Spring Boot services connected through Kafka. The ingestion service accepts and validates events, then publishes them asynchronously. The consumer processes each message, persists it and its failure grouping in PostgreSQL, and serves APIs for browsing and managing failure groups.
 
-- Separate event ingestion from incident processing.
-- Process events asynchronously.
-- Prevent duplicate events from creating duplicate incident records.
-- Persist incident data reliably.
-- Provide APIs for incident management.
-- Support evidence-based AI investigation.
-- Make failures observable and testable.
-- Keep local development manageable for a solo developer.
+```text
+Producer
+  │ POST /api/v1/events
+  ▼
+Event Ingestion (port 8080) ── Kafka: signallens.events ──► Event Consumer (port 8081)
+                                                              │
+                                                              ▼
+                                                        PostgreSQL
+                                                              ▲
+Dashboard / API client ── GET/PATCH /api/failure-groups ──────┘
+```
 
-## 3. Core Components
+## Components
 
-### Event Ingestion Service
+### Event ingestion service
 
-Receives error events over HTTP, validates incoming payloads, applies appropriate request limits, and publishes accepted events to Kafka.
+`services/event-ingestion` exposes `POST /api/v1/events`. It deserializes and validates the request, normalizes selected strings, applies the 64 KiB request-body limit, and publishes an `IngestedEvent` to Kafka using `eventId` as the message key. The asynchronous HTTP response is `202 Accepted` after the Kafka send future succeeds. A publish failure returns `503 Service Unavailable`. Validation or malformed input returns `400`; oversized input returns `413`.
+
+The service currently has no authentication, durable idempotency store, duplicate payload comparison, or rate limiting. The Kafka key is useful for partitioning but does not itself deduplicate submissions.
 
 ### Kafka
 
-Transports events asynchronously between ingestion and incident processing. Supports consumer groups, retries, and recovery strategies.
+The local Compose setup runs a single Apache Kafka broker on port `9092`. It is configured with three partitions and a persistent Docker volume. Both services use the topic `signallens.events`. The consumer group ID is `signallens-event-consumer`.
 
-### Incident Service
+### Event consumer and persistence
 
-Consumes events, computes fingerprints, groups related errors into incidents, persists events and incidents, and manages incident lifecycle state.
+`services/event-consumer` consumes Kafka messages, classifies severity as `Warning`, `Application Error`, or `Critical Failure`, and persists processed event records in PostgreSQL. Event IDs are primary deduplication keys: an existing event is skipped, and an atomic insert protects against concurrent duplicate deliveries. Event persistence and failure grouping run transactionally.
 
-### PostgreSQL
+Failure groups are identified by a SHA-256 fingerprint over service name, environment, exception type, and normalized message. Message normalization strips outer whitespace, lowercases the text, and collapses whitespace. Each distinct event occurrence is stored against its group; repeated event IDs do not increment the group count. A new group starts as `OPEN`. Group status changes are `OPEN → ACKNOWLEDGED`, `OPEN/ACKNOWLEDGED → RESOLVED`, and `RESOLVED → OPEN`.
 
-Stores durable application data. Each service owns its data and schema or database boundary.
+The local database is PostgreSQL on port `5432`, database name configured by Compose. The consumer connects using the `signallens_db_pswrd` environment variable. Hibernate currently uses `ddl-auto=update` and SQL logging; use a managed schema migration strategy and production-safe settings before deployment.
 
-### Redis
+### Failure management API
 
-Provides caching, rate limiting, and temporary state when justified by the implementation.
+The consumer serves APIs on port `8081`:
 
-### API Gateway
+- `GET /api/failure-groups` lists groups, with optional `status`, `serviceName`, and `environment` filters and pagination.
+- `GET /api/failure-groups/{id}` returns one group.
+- `GET /api/failure-groups/{id}/occurrences` lists its occurrences.
+- `PATCH /api/failure-groups/{id}/acknowledge`, `/resolve`, and `/reopen` perform the supported status transitions.
 
-Routes dashboard requests to the appropriate backend service and integrates with the security model.
+Pages default to 20 items and are capped at 100. Sorting is restricted to allowlisted fields. Missing resources return 404; invalid query values return 400; invalid state transitions return 409. Authentication and authorization are not implemented.
 
-### Frontend
+## Event lifecycle
 
-A React and TypeScript dashboard for viewing incidents, investigating timelines, and managing incident status.
+1. A producer submits one event to the ingestion endpoint.
+2. The ingestion service validates the request and waits for Kafka's send result before acknowledging acceptance.
+3. Kafka delivers the event to the consumer group.
+4. The consumer stores the processed event and creates or updates a failure group and occurrence in a database transaction.
+5. A client queries or changes failure-group status through the consumer API.
 
-### AI Investigation Service
+HTTP acceptance means Kafka acknowledged the publish; it does not mean PostgreSQL processing is complete. The current flow does not use an outbox or Kafka/database distributed transaction. Production delivery, retry, dead-letter, and offset-commit guarantees require further configuration and validation.
 
-Uses Spring AI and retrieval-augmented generation to retrieve relevant runbooks and propose evidence-based investigation steps.
+## Local infrastructure
 
-### Observability
+`infrastructure/docker/docker-compose.yml` defines Kafka and PostgreSQL with named data volumes. Compose reads `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` from the environment or a root `.env` file. Both Spring services currently point to localhost endpoints, so they are expected to run on the host while these dependencies run in Docker.
 
-Uses structured logs, correlation identifiers, metrics, traces, Prometheus, Grafana, and OpenTelemetry to understand system behavior.
+## Not implemented yet
 
-## 4. Primary Event Flow
-
-1. A simulated application generates an error event.
-2. The application submits the event to the Event Ingestion Service.
-3. The ingestion service validates the event and publishes it to Kafka.
-4. The Incident Service consumes the event.
-5. The service computes an error fingerprint and determines whether an incident already exists.
-6. Incident and event records are persisted in PostgreSQL.
-7. The dashboard retrieves incident information through backend APIs.
-8. The AI Investigation Service retrieves relevant documentation and analyzes available incident evidence.
-
-## 5. Reliability Requirements
-
-- Validate incoming events.
-- Use stable event identifiers for deduplication.
-- Make event processing idempotent.
-- Define bounded retry and dead-letter handling.
-- Handle failures between Kafka and PostgreSQL.
-- Track processing latency and failures.
-- Avoid claiming successful durable acceptance unless the configured delivery guarantees support that claim.
-
-## 6. Security Requirements
-
-- Authenticate and authorize protected APIs.
-- Validate and limit request sizes.
-- Avoid storing secrets in source control.
-- Avoid logging credentials or sensitive payload contents.
-- Protect internal service endpoints.
-- Restrict AI investigation to authorized incident data.
-
-## 7. Development Strategy
-
-Build and test the system incrementally.
-
-Start with the Event Ingestion Service and its validation rules. Introduce Kafka after the basic REST endpoint is working. Add incident persistence and correlation before implementing advanced reliability patterns, the frontend, observability, and AI investigation.
-
-## 8. Initial Non-Goals
-
-- Kubernetes deployment.
-- Multi-region infrastructure.
-- A production-grade enterprise identity platform.
-- Autonomous remediation of incidents.
-- Multiple databases or messaging platforms without a demonstrated need.
-
-These features may be considered later if they provide clear engineering value.
+There is no frontend, API gateway, authentication, authorization, rate limiting, Redis, AI/RAG investigation, OpenTelemetry instrumentation, Prometheus/Grafana setup, deployment orchestration, or explicit dead-letter and retry policy in the current repository. These remain potential future work, not current architecture components.
