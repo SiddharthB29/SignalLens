@@ -25,6 +25,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.Comparator;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -420,6 +425,114 @@ class FailureGroupControllerIntegrationTest {
                 "OPEN",
                 reopenResponse.getBody().path("status").asText()
         );
+    }
+
+    @Test
+    void concurrentStatusTransitionsShouldAllowOnlyOneUpdate() throws Exception {
+
+        FailureGroupEntity group = createFailureGroup(
+                "payment-service",
+                Environment.PRODUCTION,
+                "Concurrent status transition failure",
+                "NullPointerException"
+        );
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+
+        try {
+            Future<ResponseEntity<JsonNode>> acknowledgeFuture =
+                    executor.submit(() -> {
+                        ready.countDown();
+                        start.await();
+
+                        return restTemplate.exchange(
+                                "/api/failure-groups/" + group.getId()
+                                        + "/acknowledge",
+                                HttpMethod.PATCH,
+                                HttpEntity.EMPTY,
+                                JsonNode.class
+                        );
+                    });
+
+            Future<ResponseEntity<JsonNode>> resolveFuture =
+                    executor.submit(() -> {
+                        ready.countDown();
+                        start.await();
+
+                        return restTemplate.exchange(
+                                "/api/failure-groups/" + group.getId()
+                                        + "/resolve",
+                                HttpMethod.PATCH,
+                                HttpEntity.EMPTY,
+                                JsonNode.class
+                        );
+                    });
+
+            assertTrue(
+                    ready.await(10, TimeUnit.SECONDS),
+                    "Both requests should be ready before starting"
+            );
+
+            start.countDown();
+
+            ResponseEntity<JsonNode> acknowledgeResponse =
+                    acknowledgeFuture.get(30, TimeUnit.SECONDS);
+
+            ResponseEntity<JsonNode> resolveResponse =
+                    resolveFuture.get(30, TimeUnit.SECONDS);
+
+            boolean acknowledgeSucceeded =
+                    acknowledgeResponse.getStatusCode() == HttpStatus.OK;
+
+            boolean resolveSucceeded =
+                    resolveResponse.getStatusCode() == HttpStatus.OK;
+
+            assertNotEquals(
+                    acknowledgeSucceeded,
+                    resolveSucceeded,
+                    "Exactly one status transition should succeed"
+            );
+
+            assertTrue(
+                    acknowledgeResponse.getStatusCode() == HttpStatus.OK
+                            || acknowledgeResponse.getStatusCode()
+                            == HttpStatus.CONFLICT
+            );
+
+            assertTrue(
+                    resolveResponse.getStatusCode() == HttpStatus.OK
+                            || resolveResponse.getStatusCode()
+                            == HttpStatus.CONFLICT
+            );
+
+            String expectedFinalStatus = acknowledgeSucceeded
+                    ? "ACKNOWLEDGED"
+                    : "RESOLVED";
+
+            ResponseEntity<JsonNode> finalResponse = restTemplate.getForEntity(
+                    "/api/failure-groups/" + group.getId(),
+                    JsonNode.class
+            );
+
+            assertEquals(HttpStatus.OK, finalResponse.getStatusCode());
+            assertNotNull(finalResponse.getBody());
+
+            assertEquals(
+                    expectedFinalStatus,
+                    finalResponse.getBody().path("status").asText(),
+                    "Final status should match the successful transition"
+            );
+
+        } finally {
+            executor.shutdownNow();
+            assertTrue(
+                    executor.awaitTermination(10, TimeUnit.SECONDS),
+                    "Executor should terminate"
+            );
+        }
     }
 
     @Test
