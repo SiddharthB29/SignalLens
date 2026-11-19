@@ -544,6 +544,16 @@ class FailureGroupControllerIntegrationTest {
         );
 
         assertEquals(HttpStatus.NOT_FOUND, response.getStatusCode());
+        assertNotNull(response.getBody());
+
+        JsonNode body = response.getBody();
+
+        assertEquals("Resource Not Found", body.path("title").asText());
+        assertEquals(404, body.path("status").asInt());
+        assertEquals(
+                "Failure group not found with ID: 999999999",
+                body.path("detail").asText()
+        );
     }
 
     @Test
@@ -622,11 +632,22 @@ class FailureGroupControllerIntegrationTest {
     void shouldReturnBadRequestForMalformedFailureGroupId() {
 
         ResponseEntity<JsonNode> response = restTemplate.getForEntity(
-                "/api/failure-groups/abc",
+                "/api/failure-groups/invalid",
                 JsonNode.class
         );
 
         assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertNotNull(response.getBody());
+        assertEquals(400, response.getBody().path("status").asInt());
+        assertEquals(
+                "Invalid Request",
+                response.getBody().path("title").asText()
+        );
+
+        assertEquals(
+                "Invalid value for parameter: id",
+                response.getBody().path("detail").asText()
+        );
     }
 
     @Test
@@ -702,6 +723,16 @@ class FailureGroupControllerIntegrationTest {
         );
 
         assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertNotNull(response.getBody());
+
+        JsonNode body = response.getBody();
+
+        assertEquals("Invalid Request", body.path("title").asText());
+        assertEquals(400, body.path("status").asInt());
+        assertEquals(
+                "Invalid failure group status: UNKNOWN",
+                body.path("detail").asText()
+        );
     }
 
     @Test
@@ -787,15 +818,15 @@ class FailureGroupControllerIntegrationTest {
                 "NullPointerException"
         );
 
-        // Resolve the group first.
-        restTemplate.exchange(
+        ResponseEntity<JsonNode> resolveResponse = restTemplate.exchange(
                 "/api/failure-groups/" + group.getId() + "/resolve",
                 HttpMethod.PATCH,
                 HttpEntity.EMPTY,
                 JsonNode.class
         );
 
-        // A resolved group cannot be acknowledged directly.
+        assertEquals(HttpStatus.OK, resolveResponse.getStatusCode());
+
         ResponseEntity<JsonNode> response = restTemplate.exchange(
                 "/api/failure-groups/" + group.getId() + "/acknowledge",
                 HttpMethod.PATCH,
@@ -804,6 +835,16 @@ class FailureGroupControllerIntegrationTest {
         );
 
         assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+        assertNotNull(response.getBody());
+
+        JsonNode body = response.getBody();
+
+        assertEquals("Operation Conflict", body.path("title").asText());
+        assertEquals(409, body.path("status").asInt());
+        assertEquals(
+                "Cannot change failure group status from RESOLVED to ACKNOWLEDGED",
+                body.path("detail").asText()
+        );
     }
 
     private FailureGroupEntity createFailureGroup(
@@ -860,5 +901,26 @@ class FailureGroupControllerIntegrationTest {
                     fingerprint
             );
         }
+    }
+
+    @Test
+    void shouldReturnBadRequestForInvalidEnvironmentFilter() {
+
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/failure-groups?environment=UNKNOWN",
+                JsonNode.class
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertNotNull(response.getBody());
+
+        JsonNode body = response.getBody();
+
+        assertEquals("Invalid Request", body.path("title").asText());
+        assertEquals(400, body.path("status").asInt());
+        assertEquals(
+                "Invalid environment: UNKNOWN",
+                body.path("detail").asText()
+        );
     }
 }

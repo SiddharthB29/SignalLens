@@ -236,9 +236,15 @@ public class FailureManagementService {
             return null;
         }
 
-        return FailureGroupStatus.valueOf(
-                status.trim().toUpperCase(Locale.ROOT)
-        );
+        String normalizedStatus = status.trim().toUpperCase(Locale.ROOT);
+
+        try {
+            return FailureGroupStatus.valueOf(normalizedStatus);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException(
+                    "Invalid failure group status: " + status.trim()
+            );
+        }
     }
 
     private Environment parseEnvironment(String environment) {
@@ -246,8 +252,14 @@ public class FailureManagementService {
             return null;
         }
 
-        return Environment.valueOf(
-                environment.trim().toUpperCase(Locale.ROOT)
-        );
+        String normalizedEnvironment = environment.trim().toUpperCase(Locale.ROOT);
+
+        try {
+            return Environment.valueOf(normalizedEnvironment);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException(
+                    "Invalid environment: " + environment.trim()
+            );
+        }
     }
 }
