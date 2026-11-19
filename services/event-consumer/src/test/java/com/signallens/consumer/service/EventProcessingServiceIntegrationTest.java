@@ -19,6 +19,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -53,6 +55,8 @@ class EventProcessingServiceIntegrationTest {
     private String testEventId;
     private String secondTestEventId;
     private String testFingerprint;
+
+    private final List<String> additionalTestEventIds = new ArrayList<>();
 
     @Test
     void processingNewEventShouldAutomaticallyCreateFailureGroup() {
@@ -266,6 +270,20 @@ class EventProcessingServiceIntegrationTest {
                     secondTestEventId
             );
         }
+
+        for (String eventId : additionalTestEventIds) {
+            jdbcTemplate.update(
+                    "DELETE FROM failure_occurrences WHERE event_id = ?",
+                    eventId
+            );
+
+            jdbcTemplate.update(
+                    "DELETE FROM processed_events WHERE event_id = ?",
+                    eventId
+            );
+        }
+
+        additionalTestEventIds.clear();
 
         if (testFingerprint != null) {
             failureGroupRepository.findByFingerprint(testFingerprint)
@@ -500,5 +518,145 @@ class EventProcessingServiceIntegrationTest {
                         .orElseThrow();
 
         assertEquals(2L, failureGroup.getOccurrenceCount());
+    }
+
+    @Test
+    void concurrentMatchingEventsShouldCreateOneGroupAndCorrectOccurrenceCountUnderHighLoad()
+            throws Exception {
+
+        // Step 1: Prepare 20 distinct events with identical failure characteristics.
+        String testPrefix = "eps-high-load-" + UUID.randomUUID();
+
+        OffsetDateTime occurredAt = OffsetDateTime.now();
+
+        List<IngestedEvent> events = new ArrayList<>();
+
+        for (int i = 0; i < 20; i++) {
+
+            String eventId = testPrefix + "-" + i;
+            additionalTestEventIds.add(eventId);
+
+            IngestedEvent event = new IngestedEvent(
+                    eventId,
+                    "payment-service",
+                    Environment.PRODUCTION,
+                    occurredAt,
+                    Severity.ERROR,
+                    "Payment processing failed",
+                    "NullPointerException",
+                    "High-load test stack trace",
+                    "high-load-trace-" + i,
+                    null
+            );
+
+            events.add(event);
+        }
+
+        testFingerprint = fingerprintGenerator.generate(events.get(0));
+
+        // Verify that all events produce the same fingerprint.
+        for (IngestedEvent event : events) {
+            assertEquals(
+                    testFingerprint,
+                    fingerprintGenerator.generate(event)
+            );
+        }
+
+        // Step 2: Prepare 10 concurrent worker threads.
+        int workerCount = 10;
+
+        ExecutorService executor =
+                Executors.newFixedThreadPool(workerCount);
+
+        java.util.concurrent.CountDownLatch ready =
+                new java.util.concurrent.CountDownLatch(workerCount);
+
+        java.util.concurrent.CountDownLatch start =
+                new java.util.concurrent.CountDownLatch(1);
+
+        List<Future<?>> futures = new ArrayList<>();
+
+        try {
+
+            // Step 3: Submit all 20 events for concurrent processing.
+            for (IngestedEvent event : events) {
+
+                Future<?> future = executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+
+                    eventProcessingService.process(event);
+
+                    return null;
+                });
+
+                futures.add(future);
+            }
+
+            // Wait until all worker threads are ready.
+            assertTrue(ready.await(10, TimeUnit.SECONDS));
+
+            // Release all workers simultaneously.
+            start.countDown();
+
+            // Wait for every submitted event to finish processing.
+            for (Future<?> future : futures) {
+                future.get(60, TimeUnit.SECONDS);
+            }
+
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+        }
+
+        // Step 4: Verify all 20 processed events were persisted.
+        Integer processedEventCount = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM processed_events
+                WHERE event_id LIKE ?
+                """,
+                Integer.class,
+                testPrefix + "%"
+        );
+
+        assertEquals(20, processedEventCount);
+
+        // Step 5: Verify exactly one failure group was created.
+        Integer groupCount = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM failure_groups
+                WHERE fingerprint = ?
+                """,
+                Integer.class,
+                testFingerprint
+        );
+
+        assertEquals(1, groupCount);
+
+        // Step 6: Verify all 20 occurrences belong to that group.
+        Integer occurrenceCount = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM failure_occurrences
+                WHERE failure_group_id = (
+                    SELECT id
+                    FROM failure_groups
+                    WHERE fingerprint = ?
+                )
+                """,
+                Integer.class,
+                testFingerprint
+        );
+
+        assertEquals(20, occurrenceCount);
+
+        // Step 7: Verify the group's occurrence counter is correct.
+        FailureGroupEntity failureGroup =
+                failureGroupRepository.findByFingerprint(testFingerprint)
+                        .orElseThrow();
+
+        assertEquals(20L, failureGroup.getOccurrenceCount());
     }
 }
